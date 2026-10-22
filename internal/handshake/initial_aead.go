@@ -7,7 +7,7 @@ import (
 	"crypto/tls"
 	"fmt"
 
-	"github.com/quic-go/quic-go/internal/protocol"
+	"github.com/oninescom/quic-go/internal/protocol"
 )
 
 var (

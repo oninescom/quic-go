@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/quic-go/quic-go/internal/protocol"
-	"github.com/quic-go/quic-go/quicvarint"
+	"github.com/oninescom/quic-go/internal/protocol"
+	"github.com/oninescom/quic-go/quicvarint"
 )
 
 // Clone clones a Config.
@@ -127,6 +127,7 @@ func populateConfig(config *Config) *Config {
 		DisablePathMTUDiscovery:          config.DisablePathMTUDiscovery,
 		EnableStreamResetPartialDelivery: config.EnableStreamResetPartialDelivery,
 		Allow0RTT:                        config.Allow0RTT,
+		CongestionControlFactory:         config.CongestionControlFactory,
 		Tracer:                           config.Tracer,
 	}
 }

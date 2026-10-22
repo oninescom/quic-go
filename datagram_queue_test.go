@@ -6,11 +6,11 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/quic-go/quic-go/internal/utils"
-	"github.com/quic-go/quic-go/internal/wire"
-	"github.com/quic-go/quic-go/qlog"
-	"github.com/quic-go/quic-go/qlogwriter"
-	"github.com/quic-go/quic-go/testutils/events"
+	"github.com/oninescom/quic-go/internal/utils"
+	"github.com/oninescom/quic-go/internal/wire"
+	"github.com/oninescom/quic-go/qlog"
+	"github.com/oninescom/quic-go/qlogwriter"
+	"github.com/oninescom/quic-go/testutils/events"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

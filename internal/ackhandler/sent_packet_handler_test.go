@@ -8,15 +8,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/quic-go/quic-go/internal/mocks"
-	"github.com/quic-go/quic-go/internal/monotime"
-	"github.com/quic-go/quic-go/internal/protocol"
-	"github.com/quic-go/quic-go/internal/qerr"
-	"github.com/quic-go/quic-go/internal/utils"
-	"github.com/quic-go/quic-go/internal/wire"
-	"github.com/quic-go/quic-go/qlog"
-	"github.com/quic-go/quic-go/qlogwriter"
-	"github.com/quic-go/quic-go/testutils/events"
+	"github.com/oninescom/quic-go/internal/mocks"
+	"github.com/oninescom/quic-go/internal/monotime"
+	"github.com/oninescom/quic-go/internal/protocol"
+	"github.com/oninescom/quic-go/internal/qerr"
+	"github.com/oninescom/quic-go/internal/utils"
+	"github.com/oninescom/quic-go/internal/wire"
+	"github.com/oninescom/quic-go/qlog"
+	"github.com/oninescom/quic-go/qlogwriter"
+	"github.com/oninescom/quic-go/testutils/events"
 
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
@@ -747,7 +747,7 @@ func TestSentPacketHandlerPacketBasedLossDetection(t *testing.T) {
 
 			if encLevel == protocol.Encryption1RTT {
 				// Migration resets the threshold and ignores late ACKs of old losses.
-				sph.MigratedPath(now, 1200)
+				sph.MigratedPath(now, 1200, nil)
 				packets.Reset()
 				_, err = sph.ReceivedAck(&wire.AckFrame{AckRanges: ackRanges(pns[1])}, protocol.Encryption1RTT, now)
 				require.NoError(t, err)
@@ -867,7 +867,7 @@ func TestSentPacketHandlerAdaptiveTimeThreshold(t *testing.T) {
 	for _, migrated := range []bool{false, true} {
 		if migrated {
 			eventRecorder.Clear()
-			sph.MigratedPath(now, 1200)
+			sph.MigratedPath(now, 1200, nil)
 			parameters.InitialRTT = utils.DefaultInitialRTT
 			require.Equal(t, []qlogwriter.Event{parameters}, eventRecorder.Events(qlog.RecoveryParametersSet{}))
 		}
@@ -1687,7 +1687,7 @@ func TestSentPacketHandlerPathProbe(t *testing.T) {
 	require.NoError(t, err)
 
 	packets.Lost = packets.Lost[:0]
-	sph.MigratedPath(now, 1200)
+	sph.MigratedPath(now, 1200, nil)
 	require.Zero(t, sph.(*sentPacketHandler).getBytesInFlight())
 	require.Equal(t, utils.DefaultInitialRTT, rttStats.SmoothedRTT())
 	require.Equal(t, []protocol.PacketNumber{pn1, pn2}, packets.Lost)
@@ -1832,7 +1832,7 @@ func testSentPacketHandlerRandomized(t *testing.T, seed uint64) {
 			now = now.Add(randDuration(0, 500*time.Millisecond))
 		}
 		if r.Int()%10 == 0 {
-			sph.MigratedPath(now, 1200)
+			sph.MigratedPath(now, 1200, nil)
 			now = now.Add(randDuration(0, 500*time.Millisecond))
 		}
 	}

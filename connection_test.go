@@ -15,18 +15,18 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/quic-go/quic-go/internal/ackhandler"
-	"github.com/quic-go/quic-go/internal/handshake"
-	"github.com/quic-go/quic-go/internal/mocks"
-	mockackhandler "github.com/quic-go/quic-go/internal/mocks/ackhandler"
-	"github.com/quic-go/quic-go/internal/monotime"
-	"github.com/quic-go/quic-go/internal/protocol"
-	"github.com/quic-go/quic-go/internal/qerr"
-	"github.com/quic-go/quic-go/internal/utils"
-	"github.com/quic-go/quic-go/internal/wire"
-	"github.com/quic-go/quic-go/qlog"
-	"github.com/quic-go/quic-go/qlogwriter"
-	"github.com/quic-go/quic-go/testutils/events"
+	"github.com/oninescom/quic-go/internal/ackhandler"
+	"github.com/oninescom/quic-go/internal/handshake"
+	"github.com/oninescom/quic-go/internal/mocks"
+	mockackhandler "github.com/oninescom/quic-go/internal/mocks/ackhandler"
+	"github.com/oninescom/quic-go/internal/monotime"
+	"github.com/oninescom/quic-go/internal/protocol"
+	"github.com/oninescom/quic-go/internal/qerr"
+	"github.com/oninescom/quic-go/internal/utils"
+	"github.com/oninescom/quic-go/internal/wire"
+	"github.com/oninescom/quic-go/qlog"
+	"github.com/oninescom/quic-go/qlogwriter"
+	"github.com/oninescom/quic-go/testutils/events"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -117,7 +117,7 @@ func newServerTestConnection(
 	if config == nil {
 		config = &Config{DisablePathMTUDiscovery: true}
 	}
-	wc := newConnection(
+	wc, err := newConnection(
 		ctx,
 		cancel,
 		sendConn,
@@ -138,6 +138,7 @@ func newServerTestConnection(
 		utils.DefaultLogger,
 		protocol.Version1,
 	)
+	require.NoError(t, err)
 	require.Nil(t, wc.testHooks)
 	conn := wc.Conn
 	conn.packer = packer
@@ -180,7 +181,7 @@ func newClientTestConnection(
 	if config == nil {
 		config = &Config{DisablePathMTUDiscovery: true}
 	}
-	conn := newClientConnection(
+	conn, err := newClientConnection(
 		context.Background(),
 		sendConn,
 		connRunner,
@@ -197,6 +198,7 @@ func newClientTestConnection(
 		utils.DefaultLogger,
 		protocol.Version1,
 	)
+	require.NoError(t, err)
 	require.Nil(t, conn.testHooks)
 	conn.packer = packer
 	for _, opt := range opts {

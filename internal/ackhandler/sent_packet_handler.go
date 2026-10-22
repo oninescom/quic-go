@@ -3,16 +3,19 @@ package ackhandler
 import (
 	"errors"
 	"fmt"
+	"net"
+	"reflect"
 	"time"
 
-	"github.com/quic-go/quic-go/internal/congestion"
-	"github.com/quic-go/quic-go/internal/monotime"
-	"github.com/quic-go/quic-go/internal/protocol"
-	"github.com/quic-go/quic-go/internal/qerr"
-	"github.com/quic-go/quic-go/internal/utils"
-	"github.com/quic-go/quic-go/internal/wire"
-	"github.com/quic-go/quic-go/qlog"
-	"github.com/quic-go/quic-go/qlogwriter"
+	congestionExt "github.com/oninescom/quic-go/congestion"
+	"github.com/oninescom/quic-go/internal/congestion"
+	"github.com/oninescom/quic-go/internal/monotime"
+	"github.com/oninescom/quic-go/internal/protocol"
+	"github.com/oninescom/quic-go/internal/qerr"
+	"github.com/oninescom/quic-go/internal/utils"
+	"github.com/oninescom/quic-go/internal/wire"
+	"github.com/oninescom/quic-go/qlog"
+	"github.com/oninescom/quic-go/qlogwriter"
 )
 
 const (
@@ -112,9 +115,13 @@ type sentPacketHandler struct {
 
 	bytesInFlight protocol.ByteCount
 
-	congestion congestion.SendAlgorithmWithDebugInfos
-	rttStats   *utils.RTTStats
-	connStats  *utils.ConnectionStats
+	congestion        congestion.SendAlgorithmWithDebugInfos
+	congestionFactory congestionExt.Factory
+	factoryInfo       congestionExt.ConnectionInfo
+	ackedPacketsInfo  []congestionExt.AckedPacketInfo
+	lostPacketsInfo   []congestionExt.LostPacketInfo
+	rttStats          *utils.RTTStats
+	connStats         *utils.ConnectionStats
 
 	// The number of times a PTO has been sent without receiving an ack.
 	ptoCount uint32
@@ -152,14 +159,96 @@ func NewSentPacketHandler(
 	qlogger qlogwriter.Recorder,
 	logger utils.Logger,
 ) SentPacketHandler {
-	congestion := congestion.NewCubicSender(
-		congestion.DefaultClock{},
+	h, err := newSentPacketHandler(
+		initialPN,
+		initialMaxDatagramSize,
 		rttStats,
 		connStats,
-		initialMaxDatagramSize,
-		true, // use Reno
+		clientAddressValidated,
+		enableECN,
+		ignorePacketsBelow,
+		pers,
 		qlogger,
+		logger,
+		nil,
+		nil,
 	)
+	if err != nil {
+		panic(err)
+	}
+	return h
+}
+
+func NewSentPacketHandlerWithFactory(
+	initialPN protocol.PacketNumber,
+	initialMaxDatagramSize protocol.ByteCount,
+	rttStats *utils.RTTStats,
+	connStats *utils.ConnectionStats,
+	clientAddressValidated bool,
+	enableECN bool,
+	ignorePacketsBelow func(protocol.PacketNumber),
+	pers protocol.Perspective,
+	qlogger qlogwriter.Recorder,
+	logger utils.Logger,
+	factory congestionExt.Factory,
+	remoteAddr net.Addr,
+) (SentPacketHandler, error) {
+	return newSentPacketHandler(
+		initialPN,
+		initialMaxDatagramSize,
+		rttStats,
+		connStats,
+		clientAddressValidated,
+		enableECN,
+		ignorePacketsBelow,
+		pers,
+		qlogger,
+		logger,
+		factory,
+		remoteAddr,
+	)
+}
+
+func newSentPacketHandler(
+	initialPN protocol.PacketNumber,
+	initialMaxDatagramSize protocol.ByteCount,
+	rttStats *utils.RTTStats,
+	connStats *utils.ConnectionStats,
+	clientAddressValidated bool,
+	enableECN bool,
+	ignorePacketsBelow func(protocol.PacketNumber),
+	pers protocol.Perspective,
+	qlogger qlogwriter.Recorder,
+	logger utils.Logger,
+	factory congestionExt.Factory,
+	remoteAddr net.Addr,
+) (*sentPacketHandler, error) {
+	factoryInfo := congestionExt.ConnectionInfo{
+		RemoteAddr:             remoteAddr,
+		InitialMaxDatagramSize: congestionExt.ByteCount(initialMaxDatagramSize),
+		MaxCongestionWindow:    congestionExt.ByteCount(protocol.MaxCongestionWindowPackets) * congestionExt.ByteCount(initialMaxDatagramSize),
+		RTTStats:               rttStats,
+	}
+	var sendAlgorithm congestion.SendAlgorithmWithDebugInfos
+	if factory == nil {
+		sendAlgorithm = congestion.NewCubicSender(
+			congestion.DefaultClock{},
+			rttStats,
+			connStats,
+			initialMaxDatagramSize,
+			true, // use Reno
+			qlogger,
+		)
+	} else {
+		controller, err := factory(factoryInfo)
+		if err != nil {
+			return nil, fmt.Errorf("create congestion controller: %w", err)
+		}
+		if isNilCongestionController(controller) {
+			return nil, errors.New("congestion control factory returned a nil controller")
+		}
+		sendAlgorithm = newCCAdapter(controller)
+	}
 
 	h := &sentPacketHandler{
 		peerCompletedAddressValidation: pers == protocol.PerspectiveServer,
@@ -178,7 +267,9 @@ func NewSentPacketHandler(
 		lostPackets:        *newLostPacketTracker(),
 		rttStats:           rttStats,
 		connStats:          connStats,
-		congestion:         congestion,
+		congestion:         sendAlgorithm,
+		congestionFactory:  factory,
+		factoryInfo:        factoryInfo,
 		ignorePacketsBelow: ignorePacketsBelow,
 		perspective:        pers,
 		qlogger:            qlogger,
@@ -189,9 +280,21 @@ func NewSentPacketHandler(
 		h.ecnTracker = newECNTracker(logger, qlogger)
 	}
 	h.qlogRecoveryParametersSet(true)
-	return h
+	return h, nil
 }
 
+func isNilCongestionController(controller congestionExt.CongestionControl) bool {
+	if controller == nil {
+		return true
+	}
+	value := reflect.ValueOf(controller)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
+}
 func (h *sentPacketHandler) qlogRecoveryParametersSet(initial bool) {
 	if h.qlogger == nil {
 		return
@@ -427,6 +530,11 @@ func (h *sentPacketHandler) getPacketNumberSpace(space protocol.PacketNumberSpac
 }
 
 func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.EncryptionLevel, rcvTime monotime.Time) (bool /* contained 1-RTT packet */, error) {
+	batchCC, hasBatchCC := h.congestion.(congestion.SendAlgorithmWithCongestionEvent)
+	if hasBatchCC {
+		h.ackedPacketsInfo = h.ackedPacketsInfo[:0]
+		h.lostPacketsInfo = h.lostPacketsInfo[:0]
+	}
 	pnSpace := h.getPacketNumberSpace(encLevel.PacketNumberSpace())
 
 	largestAcked := ack.LargestAcked()
@@ -502,11 +610,23 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 			h.detectLostPathProbes(rcvTime)
 		}
 	}
-	// report spurious losses after any new congestion events from this ACK
-	for _, pn := range spuriousLosses {
-		h.congestion.OnSpuriousLoss(pn)
+	// Preserve the existing callback order for controllers that consume the
+	// per-packet congestion events directly. Batch controllers receive the
+	// complete event below, before spurious losses are reported.
+	if !hasBatchCC {
+		for _, pn := range spuriousLosses {
+			h.congestion.OnSpuriousLoss(pn)
+		}
 	}
 	if len(ackedPackets) == 0 {
+		if hasBatchCC && len(h.lostPacketsInfo) > 0 {
+			batchCC.OnCongestionEventEx(priorInFlight, rcvTime, nil, h.lostPacketsInfo)
+		}
+		if hasBatchCC {
+			for _, pn := range spuriousLosses {
+				h.congestion.OnSpuriousLoss(pn)
+			}
+		}
 		if len(spuriousLosses) > 0 && h.qlogger != nil {
 			h.qlogMetricsUpdated()
 		}
@@ -520,6 +640,13 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 	for _, p := range ackedPackets {
 		if p.includedInBytesInFlight {
 			h.congestion.OnPacketAcked(p.PacketNumber, p.Length, priorInFlight, rcvTime)
+			if hasBatchCC {
+				h.ackedPacketsInfo = append(h.ackedPacketsInfo, congestionExt.AckedPacketInfo{
+					PacketNumber: congestionExt.PacketNumber(p.PacketNumber),
+					BytesAcked:   congestionExt.ByteCount(p.Length),
+					ReceivedTime: rcvTime.ToTime(),
+				})
+			}
 		}
 		if p.EncryptionLevel == protocol.Encryption1RTT {
 			acked1RTTPacket = true
@@ -527,6 +654,14 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 		h.removeFromBytesInFlight(p.packet)
 		if !p.isPathProbePacket {
 			putPacket(p.packet)
+		}
+	}
+	if hasBatchCC && (len(h.ackedPacketsInfo) > 0 || len(h.lostPacketsInfo) > 0) {
+		batchCC.OnCongestionEventEx(priorInFlight, rcvTime, h.ackedPacketsInfo, h.lostPacketsInfo)
+	}
+	if hasBatchCC {
+		for _, pn := range spuriousLosses {
+			h.congestion.OnSpuriousLoss(pn)
 		}
 	}
 
@@ -885,6 +1020,9 @@ func countPacketNumbers(pns []protocol.PacketNumber, lower, upper protocol.Packe
 }
 
 func (h *sentPacketHandler) detectLostPackets(now monotime.Time, encLevel protocol.EncryptionLevel) {
+	if _, ok := h.congestion.(congestion.SendAlgorithmWithCongestionEvent); ok {
+		h.lostPacketsInfo = h.lostPacketsInfo[:0]
+	}
 	pnSpace := h.getPacketNumberSpace(encLevel.PacketNumberSpace())
 	pnSpace.lossTime = 0
 	space := encLevel.PacketNumberSpace()
@@ -976,6 +1114,12 @@ func (h *sentPacketHandler) detectLostPackets(now monotime.Time, encLevel protoc
 				h.queueFramesForRetransmission(p)
 				if !p.IsPathMTUProbePacket {
 					h.congestion.OnCongestionEvent(pn, p.Length, priorInFlight)
+					if _, ok := h.congestion.(congestion.SendAlgorithmWithCongestionEvent); ok {
+						h.lostPacketsInfo = append(h.lostPacketsInfo, congestionExt.LostPacketInfo{
+							PacketNumber: congestionExt.PacketNumber(pn),
+							BytesLost:    congestionExt.ByteCount(p.Length),
+						})
+					}
 				}
 				if encLevel == protocol.Encryption1RTT && h.ecnTracker != nil {
 					h.ecnTracker.LostPacket(pn)
@@ -1012,7 +1156,11 @@ func (h *sentPacketHandler) OnLossDetectionTimeout(now monotime.Time) error {
 			})
 		}
 		// Early retransmit or time loss detection
+		priorInFlight := h.bytesInFlight
 		h.detectLostPackets(now, encLevel)
+		if batchCC, ok := h.congestion.(congestion.SendAlgorithmWithCongestionEvent); ok && len(h.lostPacketsInfo) > 0 {
+			batchCC.OnCongestionEventEx(priorInFlight, now, nil, h.lostPacketsInfo)
+		}
 		return nil
 	}
 
@@ -1234,7 +1382,7 @@ func (h *sentPacketHandler) ResetForRetry(now monotime.Time) {
 	h.ptoCount = 0
 }
 
-func (h *sentPacketHandler) MigratedPath(now monotime.Time, initialMaxDatagramSize protocol.ByteCount) {
+func (h *sentPacketHandler) MigratedPath(now monotime.Time, initialMaxDatagramSize protocol.ByteCount, remoteAddr net.Addr) error {
 	h.rttStats.ResetForPathMigration()
 	h.packetThresholdDisabled = false
 	h.timeThresholdEighths = defaultTimeThresholdEighths
@@ -1255,14 +1403,31 @@ func (h *sentPacketHandler) MigratedPath(now monotime.Time, initialMaxDatagramSi
 	for pn := range h.hist.PathProbes() {
 		h.hist.RemovePathProbe(pn)
 	}
-	h.congestion = congestion.NewCubicSender(
-		congestion.DefaultClock{},
-		h.rttStats,
-		h.connStats,
-		initialMaxDatagramSize,
-		true, // use Reno
-		h.qlogger,
-	)
+	info := h.factoryInfo
+	info.RemoteAddr = remoteAddr
+	info.InitialMaxDatagramSize = congestionExt.ByteCount(initialMaxDatagramSize)
+	info.MaxCongestionWindow = congestionExt.ByteCount(protocol.MaxCongestionWindowPackets) * congestionExt.ByteCount(initialMaxDatagramSize)
+	if h.congestionFactory == nil {
+		h.congestion = congestion.NewCubicSender(
+			congestion.DefaultClock{},
+			h.rttStats,
+			h.connStats,
+			initialMaxDatagramSize,
+			true, // use Reno
+			h.qlogger,
+		)
+	} else {
+		controller, err := h.congestionFactory(info)
+		if err != nil {
+			return fmt.Errorf("recreate congestion controller after path migration: %w", err)
+		}
+		if isNilCongestionController(controller) {
+			return errors.New("recreate congestion controller after path migration: factory returned a nil controller")
+		}
+		h.congestion = newCCAdapter(controller)
+		h.factoryInfo = info
+	}
 	h.qlogRecoveryParametersSet(true)
 	h.setLossDetectionTimer(now)
+	return nil
 }

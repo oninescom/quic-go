@@ -10,15 +10,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/quic-go/quic-go/internal/handshake"
-	"github.com/quic-go/quic-go/internal/monotime"
-	"github.com/quic-go/quic-go/internal/protocol"
-	"github.com/quic-go/quic-go/internal/qerr"
-	"github.com/quic-go/quic-go/internal/utils"
-	"github.com/quic-go/quic-go/internal/wire"
-	"github.com/quic-go/quic-go/qlog"
-	"github.com/quic-go/quic-go/qlogwriter"
-	"github.com/quic-go/quic-go/testutils/events"
+	"github.com/oninescom/quic-go/internal/handshake"
+	"github.com/oninescom/quic-go/internal/monotime"
+	"github.com/oninescom/quic-go/internal/protocol"
+	"github.com/oninescom/quic-go/internal/qerr"
+	"github.com/oninescom/quic-go/internal/utils"
+	"github.com/oninescom/quic-go/internal/wire"
+	"github.com/oninescom/quic-go/qlog"
+	"github.com/oninescom/quic-go/qlogwriter"
+	"github.com/oninescom/quic-go/testutils/events"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -54,7 +54,7 @@ type serverOpts struct {
 		qlogwriter.Trace,
 		utils.Logger,
 		protocol.Version,
-	) *wrappedConn
+	) (*wrappedConn, error)
 }
 
 func newTestServer(t *testing.T, serverOpts *serverOpts) *testServer {
@@ -681,7 +681,7 @@ func (r *connConstructorRecorder) NewConn(
 	_ qlogwriter.Trace,
 	_ utils.Logger,
 	_ protocol.Version,
-) *wrappedConn {
+) (*wrappedConn, error) {
 	r.ch <- connConstructorArgs{
 		ctx:              ctx,
 		connRunner:       connRunner,
@@ -694,7 +694,7 @@ func (r *connConstructorRecorder) NewConn(
 	}
 	hooks := r.hooks[0]
 	r.hooks = r.hooks[1:]
-	return &wrappedConn{testHooks: hooks}
+	return &wrappedConn{testHooks: hooks}, nil
 }
 
 func TestServerCreateConnection(t *testing.T) {
@@ -912,10 +912,10 @@ func TestServerReceiveQueue(t *testing.T) {
 			_ qlogwriter.Trace,
 			_ utils.Logger,
 			_ protocol.Version,
-		) *wrappedConn {
+		) (*wrappedConn, error) {
 			newConnChan <- struct{}{}
 			<-acceptConn
-			return &wrappedConn{testHooks: &connTestHooks{handlePacket: func(receivedPacket) {}}}
+			return &wrappedConn{testHooks: &connTestHooks{handlePacket: func(receivedPacket) {}}}, nil
 		},
 	})
 

@@ -15,16 +15,16 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/quic-go/quic-go/internal/ackhandler"
-	"github.com/quic-go/quic-go/internal/handshake"
-	"github.com/quic-go/quic-go/internal/monotime"
-	"github.com/quic-go/quic-go/internal/protocol"
-	"github.com/quic-go/quic-go/internal/qerr"
-	"github.com/quic-go/quic-go/internal/utils"
-	"github.com/quic-go/quic-go/internal/utils/ringbuffer"
-	"github.com/quic-go/quic-go/internal/wire"
-	"github.com/quic-go/quic-go/qlog"
-	"github.com/quic-go/quic-go/qlogwriter"
+	"github.com/oninescom/quic-go/internal/ackhandler"
+	"github.com/oninescom/quic-go/internal/handshake"
+	"github.com/oninescom/quic-go/internal/monotime"
+	"github.com/oninescom/quic-go/internal/protocol"
+	"github.com/oninescom/quic-go/internal/qerr"
+	"github.com/oninescom/quic-go/internal/utils"
+	"github.com/oninescom/quic-go/internal/utils/ringbuffer"
+	"github.com/oninescom/quic-go/internal/wire"
+	"github.com/oninescom/quic-go/qlog"
+	"github.com/oninescom/quic-go/qlogwriter"
 )
 
 type unpacker interface {
@@ -266,7 +266,7 @@ var newConnection = func(
 	qlogTrace qlogwriter.Trace,
 	logger utils.Logger,
 	v protocol.Version,
-) *wrappedConn {
+) (*wrappedConn, error) {
 	s := &Conn{
 		ctx:                 ctx,
 		ctxCancel:           ctxCancel,
@@ -310,7 +310,7 @@ var newConnection = func(
 	)
 	s.preSetup()
 	s.rttStats.SetInitialRTT(rtt)
-	s.sentPacketHandler = ackhandler.NewSentPacketHandler(
+	sentPacketHandler, err := ackhandler.NewSentPacketHandlerWithFactory(
 		0,
 		s.config.initialPacketSize(),
 		s.rttStats,
@@ -321,7 +321,14 @@ var newConnection = func(
 		s.perspective,
 		s.qlogger,
 		s.logger,
+		conf.CongestionControlFactory,
+		conn.RemoteAddr(),
 	)
+	if err != nil {
+		ctxCancel(err)
+		return nil, fmt.Errorf("create server congestion controller: %w", err)
+	}
+	s.sentPacketHandler = sentPacketHandler
 	s.maxPayloadSizeEstimate.Store(uint32(estimateMaxPayloadSize(s.config.initialPacketSize())))
 	statelessResetToken := statelessResetter.GetStatelessResetToken(srcConnID)
 	params := &wire.TransportParameters{
@@ -371,7 +378,7 @@ var newConnection = func(
 	s.packer = newPacketPacker(srcConnID, s.connIDManager.Get, s.initialStream, s.handshakeStream, s.sentPacketHandler, s.retransmissionQueue, cs, s.framer, &s.receivedPacketHandler, s.datagramQueue, s.perspective, s.qlogger)
 	s.unpacker = newPacketUnpacker(cs, s.srcConnIDLen)
 	s.cryptoStreamManager = newCryptoStreamManager(s.initialStream, s.handshakeStream, s.oneRTTStream)
-	return &wrappedConn{Conn: s}
+	return &wrappedConn{Conn: s}, nil
 }
 
 // declare this as a variable, such that we can it mock it in the tests
@@ -391,7 +398,7 @@ var newClientConnection = func(
 	qlogTrace qlogwriter.Trace,
 	logger utils.Logger,
 	v protocol.Version,
-) *wrappedConn {
+) (*wrappedConn, error) {
 	s := &Conn{
 		conn:                conn,
 		config:              conf,
@@ -451,7 +458,7 @@ var newClientConnection = func(
 			s.rttStats.SetInitialRTT(token.rtt)
 		}
 	}
-	s.sentPacketHandler = ackhandler.NewSentPacketHandler(
+	sentPacketHandler, err := ackhandler.NewSentPacketHandlerWithFactory(
 		initialPacketNumber,
 		s.config.initialPacketSize(),
 		s.rttStats,
@@ -462,7 +469,14 @@ var newClientConnection = func(
 		s.perspective,
 		s.qlogger,
 		s.logger,
+		conf.CongestionControlFactory,
+		conn.RemoteAddr(),
 	)
+	if err != nil {
+		s.ctxCancel(err)
+		return nil, fmt.Errorf("create client congestion controller: %w", err)
+	}
+	s.sentPacketHandler = sentPacketHandler
 	s.maxPayloadSizeEstimate.Store(uint32(estimateMaxPayloadSize(s.config.initialPacketSize())))
 	oneRTTStream := newCryptoStream()
 	params := &wire.TransportParameters{
@@ -510,7 +524,7 @@ var newClientConnection = func(
 	if token != nil {
 		s.packer.SetToken(token.data)
 	}
-	return &wrappedConn{Conn: s}
+	return &wrappedConn{Conn: s}, nil
 }
 
 func (c *Conn) preSetup() {
@@ -926,7 +940,10 @@ func (c *Conn) idleTimeoutStartTime() monotime.Time {
 
 func (c *Conn) switchToNewPath(tr *Transport, now monotime.Time) {
 	initialPacketSize := protocol.ByteCount(cmp.Or(c.config.InitialPacketSize, protocol.MinInitialPacketSize))
-	c.sentPacketHandler.MigratedPath(now, initialPacketSize)
+	if err := c.sentPacketHandler.MigratedPath(now, initialPacketSize, c.conn.RemoteAddr()); err != nil {
+		c.closeLocal(&qerr.TransportError{ErrorCode: qerr.InternalError, ErrorMessage: err.Error()})
+		return
+	}
 	c.maxPayloadSizeEstimate.Store(uint32(estimateMaxPayloadSize(initialPacketSize)))
 	c.mtuDiscoverer.Reset(initialPacketSize, c.maxMTU())
 	c.conn = newSendConn(tr.conn, c.conn.RemoteAddr(), packetInfo{}, utils.DefaultLogger) // TODO: find a better way
@@ -1301,7 +1318,10 @@ func (c *Conn) handleShortHeaderPacket(
 	}
 	c.pathManager.SwitchToPath(p.remoteAddr)
 	initialPacketSize := protocol.ByteCount(cmp.Or(c.config.InitialPacketSize, protocol.MinInitialPacketSize))
-	c.sentPacketHandler.MigratedPath(p.rcvTime, initialPacketSize)
+	if err := c.sentPacketHandler.MigratedPath(p.rcvTime, initialPacketSize, p.remoteAddr); err != nil {
+		c.closeLocal(&qerr.TransportError{ErrorCode: qerr.InternalError, ErrorMessage: err.Error()})
+		return true, nil
+	}
 	c.maxPayloadSizeEstimate.Store(uint32(estimateMaxPayloadSize(initialPacketSize)))
 	c.mtuDiscoverer.Reset(initialPacketSize, c.maxMTU())
 	if !c.config.DisablePathMTUDiscovery && c.conn.capabilities().DF {

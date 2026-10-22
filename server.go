@@ -9,14 +9,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/quic-go/quic-go/internal/handshake"
-	"github.com/quic-go/quic-go/internal/monotime"
-	"github.com/quic-go/quic-go/internal/protocol"
-	"github.com/quic-go/quic-go/internal/qerr"
-	"github.com/quic-go/quic-go/internal/utils"
-	"github.com/quic-go/quic-go/internal/wire"
-	"github.com/quic-go/quic-go/qlog"
-	"github.com/quic-go/quic-go/qlogwriter"
+	"github.com/oninescom/quic-go/internal/handshake"
+	"github.com/oninescom/quic-go/internal/monotime"
+	"github.com/oninescom/quic-go/internal/protocol"
+	"github.com/oninescom/quic-go/internal/qerr"
+	"github.com/oninescom/quic-go/internal/utils"
+	"github.com/oninescom/quic-go/internal/wire"
+	"github.com/oninescom/quic-go/qlog"
+	"github.com/oninescom/quic-go/qlogwriter"
 )
 
 // ErrServerClosed is returned by [Listener.Accept] or [EarlyListener.Accept]
@@ -105,7 +105,7 @@ type baseServer struct {
 		qlogwriter.Trace,
 		utils.Logger,
 		protocol.Version,
-	) *wrappedConn
+	) (*wrappedConn, error)
 
 	closeMx sync.Mutex
 	// errorChan is closed when Close is called. This has two effects:
@@ -829,7 +829,7 @@ func (s *baseServer) handleInitialImpl(p receivedPacket, hdr *wire.Header) error
 		return err
 	}
 	s.logger.Debugf("Changing connection ID to %s.", connID)
-	conn = s.newConn(
+	conn, err = s.newConn(
 		ctx,
 		cancel,
 		newSendConn(s.conn, p.remoteAddr, p.info, s.logger),
@@ -850,6 +850,12 @@ func (s *baseServer) handleInitialImpl(p receivedPacket, hdr *wire.Header) error
 		s.logger,
 		hdr.Version,
 	)
+	if err != nil {
+		cancel(err)
+		s.logger.Debugf("Rejecting new connection due to congestion control factory error: %s", err)
+		s.refuseNewConn(p, hdr)
+		return err
+	}
 	conn.handlePacket(p)
 	// Adding the connection will fail if the client's chosen Destination Connection ID is already in use.
 	// This is very unlikely: Even if an attacker chooses a connection ID that's already in use,

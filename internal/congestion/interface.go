@@ -1,8 +1,9 @@
 package congestion
 
 import (
-	"github.com/quic-go/quic-go/internal/monotime"
-	"github.com/quic-go/quic-go/internal/protocol"
+	congestionExt "github.com/oninescom/quic-go/congestion"
+	"github.com/oninescom/quic-go/internal/monotime"
+	"github.com/oninescom/quic-go/internal/protocol"
 )
 
 // A SendAlgorithm performs congestion control
@@ -25,4 +26,10 @@ type SendAlgorithmWithDebugInfos interface {
 	InSlowStart() bool
 	InRecovery() bool
 	GetCongestionWindow() protocol.ByteCount
+}
+
+// SendAlgorithmWithCongestionEvent optionally receives a complete ACK/loss batch.
+type SendAlgorithmWithCongestionEvent interface {
+	SendAlgorithm
+	OnCongestionEventEx(priorInFlight protocol.ByteCount, eventTime monotime.Time, ackedPackets []congestionExt.AckedPacketInfo, lostPackets []congestionExt.LostPacketInfo)
 }

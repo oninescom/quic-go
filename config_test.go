@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/quic-go/quic-go/internal/protocol"
-	"github.com/quic-go/quic-go/qlogwriter"
-	"github.com/quic-go/quic-go/quicvarint"
+	"github.com/oninescom/quic-go/internal/protocol"
+	"github.com/oninescom/quic-go/qlogwriter"
+	"github.com/oninescom/quic-go/quicvarint"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -86,7 +86,7 @@ func configWithNonZeroNonFunctionFields(t *testing.T) *Config {
 		}
 
 		switch fn := typ.Field(i).Name; fn {
-		case "GetConfigForClient", "RequireAddressValidation", "GetLogWriter", "AllowConnectionWindowIncrease", "Tracer":
+		case "GetConfigForClient", "RequireAddressValidation", "GetLogWriter", "AllowConnectionWindowIncrease", "CongestionControlFactory", "Tracer":
 			// Can't compare functions.
 		case "Versions":
 			f.Set(reflect.ValueOf([]Version{1, 2, 3}))

@@ -1,9 +1,11 @@
 package ackhandler
 
 import (
-	"github.com/quic-go/quic-go/internal/monotime"
-	"github.com/quic-go/quic-go/internal/protocol"
-	"github.com/quic-go/quic-go/internal/wire"
+	"net"
+
+	"github.com/oninescom/quic-go/internal/monotime"
+	"github.com/oninescom/quic-go/internal/protocol"
+	"github.com/oninescom/quic-go/internal/wire"
 )
 
 // SentPacketHandler handles ACKs received for outgoing packets
@@ -35,5 +37,5 @@ type SentPacketHandler interface {
 	GetLossDetectionTimeout() monotime.Time
 	OnLossDetectionTimeout(now monotime.Time) error
 
-	MigratedPath(now monotime.Time, initialMaxPacketSize protocol.ByteCount)
+	MigratedPath(now monotime.Time, initialMaxPacketSize protocol.ByteCount, remoteAddr net.Addr) error
 }

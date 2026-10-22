@@ -8,9 +8,10 @@ import (
 	"slices"
 	"time"
 
-	"github.com/quic-go/quic-go/internal/handshake"
-	"github.com/quic-go/quic-go/internal/protocol"
-	"github.com/quic-go/quic-go/qlogwriter"
+	"github.com/oninescom/quic-go/congestion"
+	"github.com/oninescom/quic-go/internal/handshake"
+	"github.com/oninescom/quic-go/internal/protocol"
+	"github.com/oninescom/quic-go/qlogwriter"
 )
 
 // The StreamID is the ID of a QUIC stream.
@@ -183,6 +184,10 @@ type Config struct {
 	// Allow0RTT allows the application to decide if a 0-RTT connection attempt should be accepted.
 	// Only valid for the server.
 	Allow0RTT bool
+	// CongestionControlFactory creates a fresh send controller per connection.
+	// If nil, quic-go uses its native congestion controller.
+	// The Factory is called again if QUIC restarts congestion state.
+	CongestionControlFactory congestion.Factory
 	// Enable QUIC datagram support (RFC 9221).
 	EnableDatagrams bool
 	// Enable QUIC Stream Resets with Partial Delivery.

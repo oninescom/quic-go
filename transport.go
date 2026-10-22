@@ -11,11 +11,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/quic-go/quic-go/internal/protocol"
-	"github.com/quic-go/quic-go/internal/utils"
-	"github.com/quic-go/quic-go/internal/wire"
-	"github.com/quic-go/quic-go/qlog"
-	"github.com/quic-go/quic-go/qlogwriter"
+	"github.com/oninescom/quic-go/internal/protocol"
+	"github.com/oninescom/quic-go/internal/utils"
+	"github.com/oninescom/quic-go/internal/wire"
+	"github.com/oninescom/quic-go/qlog"
+	"github.com/oninescom/quic-go/qlogwriter"
 )
 
 // ErrTransportClosed is returned by [Transport.Listen], [Transport.ListenEarly], [Transport.Dial],
@@ -300,7 +300,7 @@ func (t *Transport) doDial(
 	logger := utils.DefaultLogger.WithPrefix("client")
 	logger.Infof("Starting new connection to %s (%s -> %s), source connection ID %s, destination connection ID %s, version %s", tlsConf.ServerName, sendConn.LocalAddr(), sendConn.RemoteAddr(), srcConnID, destConnID, version)
 
-	conn := newClientConnection(
+	conn, err := newClientConnection(
 		context.WithoutCancel(ctx),
 		sendConn,
 		(*packetHandlerMap)(t),
@@ -317,6 +317,10 @@ func (t *Transport) doDial(
 		logger,
 		version,
 	)
+	if err != nil {
+		t.mutex.Unlock()
+		return nil, err
+	}
 	t.handlers[srcConnID] = conn
 	t.mutex.Unlock()
 

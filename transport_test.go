@@ -13,14 +13,14 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/quic-go/quic-go/internal/protocol"
-	"github.com/quic-go/quic-go/internal/qerr"
-	"github.com/quic-go/quic-go/internal/utils"
-	"github.com/quic-go/quic-go/internal/wire"
-	"github.com/quic-go/quic-go/qlog"
-	"github.com/quic-go/quic-go/qlogwriter"
-	"github.com/quic-go/quic-go/testutils/events"
-	"github.com/quic-go/quic-go/testutils/simnet"
+	"github.com/oninescom/quic-go/internal/protocol"
+	"github.com/oninescom/quic-go/internal/qerr"
+	"github.com/oninescom/quic-go/internal/utils"
+	"github.com/oninescom/quic-go/internal/wire"
+	"github.com/oninescom/quic-go/qlog"
+	"github.com/oninescom/quic-go/qlogwriter"
+	"github.com/oninescom/quic-go/testutils/events"
+	"github.com/oninescom/quic-go/testutils/simnet"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -527,8 +527,8 @@ func testTransportDial(t *testing.T, early bool) {
 			_ qlogwriter.Trace,
 			_ utils.Logger,
 			_ protocol.Version,
-		) *wrappedConn {
-			return &wrappedConn{testHooks: conn}
+		) (*wrappedConn, error) {
+			return &wrappedConn{testHooks: conn}, nil
 		}
 
 		tr := &Transport{Conn: serverConn}
@@ -603,13 +603,13 @@ func TestTransportDialingVersionNegotiation(t *testing.T) {
 		_ qlogwriter.Trace,
 		_ utils.Logger,
 		v protocol.Version,
-	) *wrappedConn {
+	) (*wrappedConn, error) {
 		connChan <- connParams{pn: pn, hasNegotiatedVersion: hasNegotiatedVersion, version: v}
 		if counter == 0 {
 			counter++
-			return &wrappedConn{testHooks: conn}
+			return &wrappedConn{testHooks: conn}, nil
 		}
-		return &wrappedConn{testHooks: conn2}
+		return &wrappedConn{testHooks: conn2}, nil
 	}
 
 	tr := &Transport{Conn: newUDPConnLocalhost(t)}

@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/internal/protocol"
+	"github.com/oninescom/quic-go"
+	"github.com/oninescom/quic-go/internal/protocol"
 
 	"github.com/stretchr/testify/require"
 )
