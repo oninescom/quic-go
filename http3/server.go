@@ -180,6 +180,10 @@ type Server struct {
 	// It is invalid to specify any settings defined by RFC 9114 (HTTP/3) and RFC 9297 (HTTP Datagrams).
 	AdditionalSettings map[uint64]uint64
 
+	// ReadHeaderTimeout limits the time to read each request's headers.
+	// Zero or negative values disable this timeout.
+	ReadHeaderTimeout time.Duration
+
 	// IdleTimeout specifies how long until idle clients connection should be
 	// closed. Idle refers only to the HTTP/3 layer, activity at the QUIC layer
 	// like PING frames are not considered.
@@ -192,7 +196,7 @@ type Server struct {
 
 	Logger *slog.Logger
 
-	mutex     sync.RWMutex
+	mutex     sync.Mutex
 	listeners []listener
 
 	closed           bool
@@ -203,7 +207,7 @@ type Server struct {
 	connCount        atomic.Int64
 	connHandlingDone chan struct{}
 
-	altSvcHeader string
+	altSvcHeader atomic.Pointer[string]
 }
 
 // ListenAndServe listens on the UDP address [Server.Addr] and calls [Server.Handler]
@@ -388,7 +392,7 @@ func extractPort(addr string) (int, error) {
 func (s *Server) generateAltSvcHeader() {
 	if len(s.listeners) == 0 {
 		// Don't announce any ports since no one is listening for connections
-		s.altSvcHeader = ""
+		s.altSvcHeader.Store(nil)
 		return
 	}
 
@@ -420,7 +424,7 @@ func (s *Server) generateAltSvcHeader() {
 		}
 	}
 
-	s.altSvcHeader = strings.Join(altSvc, ",")
+	s.altSvcHeader.Store(new(strings.Join(altSvc, ",")))
 }
 
 func (s *Server) addListener(l *QUICListener, createdLocally bool) error {
@@ -455,14 +459,14 @@ func (s *Server) removeListener(l *QUICListener) {
 }
 
 func (s *Server) NewRawServerConn(conn *quic.Conn) (*RawServerConn, error) {
-	hconn, _, _, err := s.newRawServerConn(conn)
+	hconn, _, err := s.newRawServerConn(conn)
 	if err != nil {
 		return nil, err
 	}
 	return hconn, nil
 }
 
-func (s *Server) newRawServerConn(conn *quic.Conn) (*RawServerConn, *quic.SendStream, qlogwriter.Recorder, error) {
+func (s *Server) newRawServerConn(conn *quic.Conn) (*RawServerConn, *quic.SendStream, error) {
 	var qlogger qlogwriter.Recorder
 	if qlogTrace := conn.QlogTrace(); qlogTrace != nil {
 		qlogger = qlogTrace.AddProducer()
@@ -488,13 +492,15 @@ func (s *Server) newRawServerConn(conn *quic.Conn) (*RawServerConn, *quic.SendSt
 		s.maxHeaderBytes(),
 	)
 
+	hconn.readHeaderTimeout = s.ReadHeaderTimeout
+
 	// open the control stream and send a SETTINGS frame, it's also used to send a GOAWAY frame later
 	// when the server is gracefully closed
 	ctrlStr, err := hconn.openControlStream(s.settings())
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("opening the control stream failed: %w", err)
+		return nil, nil, fmt.Errorf("opening the control stream failed: %w", err)
 	}
-	return hconn, ctrlStr, qlogger, nil
+	return hconn, ctrlStr, nil
 }
 
 func (s *Server) settings() *settings {
@@ -509,7 +515,14 @@ func (s *Server) settings() *settings {
 // handleConn handles the HTTP/3 exchange on a QUIC connection.
 // It blocks until all HTTP handlers for all streams have returned.
 func (s *Server) handleConn(conn *quic.Conn) error {
-	hconn, ctrlStr, qlogger, err := s.newRawServerConn(conn)
+	// The GOAWAY frame is recorded here, not by rawConn, so handleConn holds its own producer.
+	var qlogger qlogwriter.Recorder
+	if qlogTrace := conn.QlogTrace(); qlogTrace != nil {
+		if qlogger = qlogTrace.AddProducer(); qlogger != nil {
+			defer qlogger.Close()
+		}
+	}
+	hconn, ctrlStr, err := s.newRawServerConn(conn)
 	if err != nil {
 		return err
 	}
@@ -566,6 +579,7 @@ func (s *Server) handleConn(conn *quic.Conn) error {
 			if qlogger != nil {
 				qlogger.RecordEvent(qlog.FrameCreated{
 					StreamID: ctrlStr.StreamID(),
+					Raw:      qlog.RawInfo{Length: qlog.OmitLength, PayloadLength: qlog.OmitLength},
 					Frame:    qlog.Frame{Frame: qlog.GoAwayFrame{StreamID: nextStreamID}},
 				})
 			}
@@ -579,6 +593,7 @@ func (s *Server) handleConn(conn *quic.Conn) error {
 			continue
 		}
 		if inGracefulShutdown {
+			str.ReleaseStreamCredit()
 			str.CancelRead(quic.StreamErrorCode(ErrCodeRequestRejected))
 			str.CancelWrite(quic.StreamErrorCode(ErrCodeRequestRejected))
 			continue
@@ -608,11 +623,10 @@ func (s *Server) maxHeaderBytes() int {
 // It is the caller's responsibility to close any connection passed to [Server.ServeQUICConn].
 func (s *Server) Close() error {
 	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
 	s.closed = true
 	// server is never used
 	if s.closeCtx == nil {
+		s.mutex.Unlock()
 		return nil
 	}
 	s.closeCancel()
@@ -625,6 +639,8 @@ func (s *Server) Close() error {
 			}
 		}
 	}
+	// Don't hold the mutex while waiting: handlers might call SetQUICHeaders.
+	s.mutex.Unlock()
 	if s.connCount.Load() == 0 {
 		return err
 	}
@@ -693,14 +709,12 @@ var ErrNoAltSvcPort = errors.New("no port can be announced, specify it explicitl
 //
 //	Alt-Svc: h3=":443"; ma=2592000
 func (s *Server) SetQUICHeaders(hdr http.Header) error {
-	s.mutex.RLock()
-	defer s.mutex.RUnlock()
-
-	if s.altSvcHeader == "" {
+	altSvc := s.altSvcHeader.Load()
+	if altSvc == nil || *altSvc == "" {
 		return ErrNoAltSvcPort
 	}
 	// use the map directly to avoid constant canonicalization since the key is already canonicalized
-	hdr["Alt-Svc"] = append(hdr["Alt-Svc"], s.altSvcHeader)
+	hdr["Alt-Svc"] = append(hdr["Alt-Svc"], *altSvc)
 	return nil
 }
 

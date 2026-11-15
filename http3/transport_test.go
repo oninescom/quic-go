@@ -391,6 +391,38 @@ func TestTransportRequestContextCancellation(t *testing.T) {
 	require.Equal(t, 1, dialCount)
 }
 
+func TestTransportDialSurvivesRequestCancellation(t *testing.T) {
+	mockCtrl := gomock.NewController(t)
+	cl := NewMockClientConn(mockCtrl)
+	conn, _ := newConnPair(t)
+	unblockDial := make(chan struct{})
+	tr := &Transport{
+		Dial: func(ctx context.Context, _ string, _ *tls.Config, _ *quic.Config) (*quic.Conn, error) {
+			<-unblockDial
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return conn, nil
+		},
+		newClientConn: func(*quic.Conn) clientConn { return cl },
+	}
+
+	// canceling the request doesn't cancel the dial...
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req1 := httptest.NewRequestWithContext(ctx, http.MethodGet, "https://quic-go.net/file1.html", nil)
+	_, err := tr.RoundTrip(req1)
+	require.ErrorIs(t, err, context.Canceled)
+	close(unblockDial)
+
+	// ... so the next request can use the connection
+	req2 := httptest.NewRequest(http.MethodGet, "https://quic-go.net/file2.html", nil)
+	cl.EXPECT().RoundTrip(req2).Return(&http.Response{Request: req2}, nil)
+	rsp, err := tr.RoundTrip(req2)
+	require.NoError(t, err)
+	require.Same(t, req2, rsp.Request)
+}
+
 func TestTransportConnetionRedialHandshakeError(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	cl := NewMockClientConn(mockCtrl)
@@ -422,7 +454,7 @@ func TestTransportConnetionRedialHandshakeError(t *testing.T) {
 
 func TestTransportCloseEstablishedConnections(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
-	conn, _ := newConnPair(t)
+	conn, serverConn := newConnPair(t)
 	tr := &Transport{
 		Dial: func(context.Context, string, *tls.Config, *quic.Config) (*quic.Conn, error) {
 			return conn, nil
@@ -439,7 +471,11 @@ func TestTransportCloseEstablishedConnections(t *testing.T) {
 	require.NoError(t, tr.Close())
 
 	select {
-	case <-conn.Context().Done():
+	case <-serverConn.Context().Done():
+		require.ErrorIs(t,
+			context.Cause(serverConn.Context()),
+			&quic.ApplicationError{Remote: true, ErrorCode: quic.ApplicationErrorCode(ErrCodeNoError)},
+		)
 	case <-time.After(time.Second):
 		t.Fatal("timeout")
 	}
@@ -483,8 +519,8 @@ func TestTransportCloseInFlightDials(t *testing.T) {
 
 func TestTransportCloseIdleConnections(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
-	conn1, _ := newConnPair(t)
-	conn2, _ := newConnPair(t)
+	conn1, serverConn1 := newConnPair(t)
+	conn2, serverConn2 := newConnPair(t)
 	roundTripCalled := make(chan struct{})
 	tr := &Transport{
 		Dial: func(_ context.Context, hostname string, _ *tls.Config, _ *quic.Config) (*quic.Conn, error) {
@@ -532,7 +568,11 @@ func TestTransportCloseIdleConnections(t *testing.T) {
 	// req1 is finished
 	tr.CloseIdleConnections()
 	select {
-	case <-conn1.Context().Done():
+	case <-serverConn1.Context().Done():
+		require.ErrorIs(t,
+			context.Cause(serverConn1.Context()),
+			&quic.ApplicationError{Remote: true, ErrorCode: quic.ApplicationErrorCode(ErrCodeNoError)},
+		)
 	case <-time.After(time.Second):
 		t.Fatal("timeout")
 	}
@@ -542,7 +582,11 @@ func TestTransportCloseIdleConnections(t *testing.T) {
 	// all requests are finished
 	tr.CloseIdleConnections()
 	select {
-	case <-conn2.Context().Done():
+	case <-serverConn2.Context().Done():
+		require.ErrorIs(t,
+			context.Cause(serverConn2.Context()),
+			&quic.ApplicationError{Remote: true, ErrorCode: quic.ApplicationErrorCode(ErrCodeNoError)},
+		)
 	case <-time.After(time.Second):
 		t.Fatal("timeout")
 	}

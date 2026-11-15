@@ -4,13 +4,12 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/oninescom/quic-go"
-	quicproxy "github.com/oninescom/quic-go/integrationtests/tools/proxy"
 	"github.com/oninescom/quic-go/internal/protocol"
 	"github.com/oninescom/quic-go/qlog"
 	"github.com/oninescom/quic-go/qlogwriter"
@@ -21,114 +20,109 @@ import (
 )
 
 func TestACKBundling(t *testing.T) {
-	const numMsg = 100
+	synctest.Test(t, func(t *testing.T) {
+		const numMsg = 100
 
-	serverCounter, serverTracer := newPacketTracer()
-	server, err := quic.Listen(
-		newUDPConnLocalhost(t),
-		getTLSConfig(),
-		getQuicConfig(&quic.Config{
-			DisablePathMTUDiscovery: true,
-			Tracer:                  func(context.Context, bool, quic.ConnectionID) qlogwriter.Trace { return serverTracer },
-		}),
-	)
-	require.NoError(t, err)
-	defer server.Close()
+		clientPacketConn, serverPacketConn, closeFn := newSimnetLink(t, 10*time.Millisecond)
+		defer closeFn(t)
 
-	proxy := quicproxy.Proxy{
-		Conn:       newUDPConnLocalhost(t),
-		ServerAddr: server.Addr().(*net.UDPAddr),
-		DelayPacket: func(quicproxy.Direction, net.Addr, net.Addr, []byte) time.Duration {
-			return 5 * time.Millisecond
-		},
-	}
-	require.NoError(t, proxy.Start())
-	defer proxy.Close()
+		serverCounter, serverTracer := newPacketTracer()
+		server, err := quic.Listen(
+			serverPacketConn,
+			getTLSConfig(),
+			getQuicConfig(&quic.Config{
+				DisablePathMTUDiscovery: true,
+				Tracer:                  func(context.Context, bool, quic.ConnectionID) qlogwriter.Trace { return serverTracer },
+			}),
+		)
+		require.NoError(t, err)
+		defer server.Close()
 
-	clientCounter, clientTracer := newPacketTracer()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	conn, err := quic.Dial(
-		ctx,
-		newUDPConnLocalhost(t),
-		proxy.LocalAddr(),
-		getTLSClientConfig(),
-		getQuicConfig(&quic.Config{
-			DisablePathMTUDiscovery: true,
-			Tracer:                  func(context.Context, bool, quic.ConnectionID) qlogwriter.Trace { return clientTracer },
-		}),
-	)
-	require.NoError(t, err)
-	defer conn.CloseWithError(0, "")
+		clientCounter, clientTracer := newPacketTracer()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		conn, err := quic.Dial(
+			ctx,
+			clientPacketConn,
+			serverPacketConn.LocalAddr(),
+			getTLSClientConfig(),
+			getQuicConfig(&quic.Config{
+				DisablePathMTUDiscovery: true,
+				Tracer:                  func(context.Context, bool, quic.ConnectionID) qlogwriter.Trace { return clientTracer },
+			}),
+		)
+		require.NoError(t, err)
+		defer conn.CloseWithError(0, "")
 
-	serverErrChan := make(chan error, 1)
-	go func() {
-		defer close(serverErrChan)
-		conn, err := server.Accept(context.Background())
-		if err != nil {
-			serverErrChan <- fmt.Errorf("accept failed: %w", err)
-			return
-		}
-		str, err := conn.AcceptStream(context.Background())
-		if err != nil {
-			serverErrChan <- fmt.Errorf("accept stream failed: %w", err)
-			return
-		}
-		b := make([]byte, 1)
-		// Echo every byte received from the client.
-		for {
-			if _, err := str.Read(b); err != nil {
-				break
-			}
-			_, err = str.Write(b)
+		serverErrChan := make(chan error, 1)
+		go func() {
+			defer close(serverErrChan)
+			conn, err := server.Accept(context.Background())
 			if err != nil {
-				serverErrChan <- fmt.Errorf("write failed: %w", err)
+				serverErrChan <- fmt.Errorf("accept failed: %w", err)
 				return
 			}
-		}
-	}()
-
-	str, err := conn.OpenStreamSync(context.Background())
-	require.NoError(t, err)
-	b := make([]byte, 1)
-	// Send numMsg 1-byte messages.
-	for i := range numMsg {
-		_, err = str.Write([]byte{uint8(i)})
-		require.NoError(t, err)
-		_, err = str.Read(b)
-		require.NoError(t, err)
-		require.Equal(t, uint8(i), b[0])
-	}
-	require.NoError(t, conn.CloseWithError(0, ""))
-	require.NoError(t, <-serverErrChan)
-
-	countBundledPackets := func(packets []packet) (numBundled int) {
-		for _, p := range packets {
-			var hasAck, hasStreamFrame bool
-			for _, f := range p.frames {
-				switch f.Frame.(type) {
-				case *qlog.AckFrame:
-					hasAck = true
-				case *qlog.StreamFrame:
-					hasStreamFrame = true
+			str, err := conn.AcceptStream(context.Background())
+			if err != nil {
+				serverErrChan <- fmt.Errorf("accept stream failed: %w", err)
+				return
+			}
+			b := make([]byte, 1)
+			// Echo every byte received from the client.
+			for {
+				if _, err := str.Read(b); err != nil {
+					break
+				}
+				_, err = str.Write(b)
+				if err != nil {
+					serverErrChan <- fmt.Errorf("write failed: %w", err)
+					return
 				}
 			}
-			if hasAck && hasStreamFrame {
-				numBundled++
-			}
+		}()
+
+		str, err := conn.OpenStreamSync(context.Background())
+		require.NoError(t, err)
+		b := make([]byte, 1)
+		// Send numMsg 1-byte messages.
+		for i := range numMsg {
+			_, err = str.Write([]byte{uint8(i)})
+			require.NoError(t, err)
+			_, err = str.Read(b)
+			require.NoError(t, err)
+			require.Equal(t, uint8(i), b[0])
 		}
-		return
-	}
+		require.NoError(t, conn.CloseWithError(0, ""))
+		require.NoError(t, <-serverErrChan)
 
-	numBundledIncoming := countBundledPackets(clientCounter.getRcvdShortHeaderPackets())
-	numBundledOutgoing := countBundledPackets(serverCounter.getRcvdShortHeaderPackets())
-	t.Logf("bundled incoming packets: %d / %d", numBundledIncoming, numMsg)
-	t.Logf("bundled outgoing packets: %d / %d", numBundledOutgoing, numMsg)
+		countBundledPackets := func(packets []packet) (numBundled int) {
+			for _, p := range packets {
+				var hasAck, hasStreamFrame bool
+				for _, f := range p.frames {
+					switch f.Frame.(type) {
+					case *qlog.AckFrame:
+						hasAck = true
+					case *qlog.StreamFrame:
+						hasStreamFrame = true
+					}
+				}
+				if hasAck && hasStreamFrame {
+					numBundled++
+				}
+			}
+			return
+		}
 
-	require.LessOrEqual(t, numBundledIncoming, numMsg)
-	require.Greater(t, numBundledIncoming, numMsg*9/10)
-	require.LessOrEqual(t, numBundledOutgoing, numMsg)
-	require.Greater(t, numBundledOutgoing, numMsg*9/10)
+		numBundledIncoming := countBundledPackets(clientCounter.getRcvdShortHeaderPackets())
+		numBundledOutgoing := countBundledPackets(serverCounter.getRcvdShortHeaderPackets())
+		t.Logf("bundled incoming packets: %d / %d", numBundledIncoming, numMsg)
+		t.Logf("bundled outgoing packets: %d / %d", numBundledOutgoing, numMsg)
+
+		require.LessOrEqual(t, numBundledIncoming, numMsg)
+		require.Greater(t, numBundledIncoming, numMsg*9/10)
+		require.LessOrEqual(t, numBundledOutgoing, numMsg)
+		require.Greater(t, numBundledOutgoing, numMsg*9/10)
+	})
 }
 
 func TestStreamDataBlocked(t *testing.T) {
@@ -140,132 +134,127 @@ func TestConnDataBlocked(t *testing.T) {
 }
 
 func testConnAndStreamDataBlocked(t *testing.T, limitStream, limitConn bool) {
-	const window = 100
-	const numBatches = 3
+	synctest.Test(t, func(t *testing.T) {
+		const window = 100
+		const numBatches = 3
 
-	initialStreamWindow := uint64(quicvarint.Max)
-	initialConnWindow := uint64(quicvarint.Max)
-	if limitStream {
-		initialStreamWindow = window
-	}
-	if limitConn {
-		initialConnWindow = window
-	}
-	rtt := scaleDuration(5 * time.Millisecond)
-
-	ln, err := quic.Listen(
-		newUDPConnLocalhost(t),
-		getTLSConfig(),
-		getQuicConfig(&quic.Config{
-			InitialStreamReceiveWindow:     initialStreamWindow,
-			InitialConnectionReceiveWindow: initialConnWindow,
-		}),
-	)
-	require.NoError(t, err)
-	defer ln.Close()
-
-	proxy := quicproxy.Proxy{
-		Conn:       newUDPConnLocalhost(t),
-		ServerAddr: ln.Addr().(*net.UDPAddr),
-		DelayPacket: func(quicproxy.Direction, net.Addr, net.Addr, []byte) time.Duration {
-			return rtt / 2
-		},
-	}
-	require.NoError(t, proxy.Start())
-	defer proxy.Close()
-
-	counter, tracer := newPacketTracer()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	conn, err := quic.Dial(
-		ctx,
-		newUDPConnLocalhost(t),
-		proxy.LocalAddr(),
-		getTLSClientConfig(),
-		getQuicConfig(&quic.Config{
-			Tracer: func(context.Context, bool, quic.ConnectionID) qlogwriter.Trace { return tracer },
-		}),
-	)
-	require.NoError(t, err)
-
-	serverConn, err := ln.Accept(ctx)
-	require.NoError(t, err)
-
-	str, err := conn.OpenUniStreamSync(ctx)
-	require.NoError(t, err)
-
-	// Stream data is consumed (almost) immediately, so flow-control window auto-tuning kicks in.
-	// The window size is doubled for every batch.
-	var windowSizes []protocol.ByteCount
-	for i := range numBatches {
-		windowSizes = append(windowSizes, window<<i)
-	}
-
-	var serverStr *quic.ReceiveStream
-	for i := range numBatches {
-		str.SetWriteDeadline(time.Now().Add(rtt))
-		n, err := str.Write(make([]byte, 10000))
-		require.ErrorIs(t, err, os.ErrDeadlineExceeded)
-		require.Equal(t, int(windowSizes[i]), n)
-
-		if i == 0 {
-			serverStr, err = serverConn.AcceptUniStream(ctx)
-			require.NoError(t, err)
+		initialStreamWindow := uint64(quicvarint.Max)
+		initialConnWindow := uint64(quicvarint.Max)
+		if limitStream {
+			initialStreamWindow = window
 		}
-		serverStr.SetReadDeadline(time.Now().Add(rtt))
-		n2, err := io.ReadFull(serverStr, make([]byte, 10000))
-		require.ErrorIs(t, err, os.ErrDeadlineExceeded)
-		require.Equal(t, n, n2)
-	}
+		if limitConn {
+			initialConnWindow = window
+		}
+		const rtt = 5 * time.Millisecond
 
-	conn.CloseWithError(0, "")
-	serverConn.CloseWithError(0, "")
+		clientPacketConn, serverPacketConn, closeFn := newSimnetLink(t, rtt)
+		defer closeFn(t)
 
-	var streamDataBlockedFrames []qlog.StreamDataBlockedFrame
-	var dataBlockedFrames []qlog.DataBlockedFrame
-	var bundledCounter int
-	for _, p := range counter.getSentShortHeaderPackets() {
-		blockedOffset := protocol.InvalidByteCount
-		for _, f := range p.frames {
-			switch frame := f.Frame.(type) {
-			case *qlog.StreamDataBlockedFrame:
-				streamDataBlockedFrames = append(streamDataBlockedFrames, *frame)
-				blockedOffset = frame.MaximumStreamData
-			case *qlog.DataBlockedFrame:
-				dataBlockedFrames = append(dataBlockedFrames, *frame)
-				blockedOffset = frame.MaximumData
-			case *qlog.StreamFrame:
-				// the STREAM frame is always packed last
-				if frame.Offset+frame.Length == int64(blockedOffset) {
-					bundledCounter++
+		ln, err := quic.Listen(
+			serverPacketConn,
+			getTLSConfig(),
+			getQuicConfig(&quic.Config{
+				InitialStreamReceiveWindow:     initialStreamWindow,
+				InitialConnectionReceiveWindow: initialConnWindow,
+			}),
+		)
+		require.NoError(t, err)
+		defer ln.Close()
+
+		counter, tracer := newPacketTracer()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		conn, err := quic.Dial(
+			ctx,
+			clientPacketConn,
+			serverPacketConn.LocalAddr(),
+			getTLSClientConfig(),
+			getQuicConfig(&quic.Config{
+				Tracer: func(context.Context, bool, quic.ConnectionID) qlogwriter.Trace { return tracer },
+			}),
+		)
+		require.NoError(t, err)
+
+		serverConn, err := ln.Accept(ctx)
+		require.NoError(t, err)
+
+		str, err := conn.OpenUniStreamSync(ctx)
+		require.NoError(t, err)
+
+		// Stream data is consumed (almost) immediately, so flow-control window auto-tuning kicks in.
+		// The window size is doubled for every batch.
+		var windowSizes []protocol.ByteCount
+		for i := range numBatches {
+			windowSizes = append(windowSizes, window<<i)
+		}
+
+		var serverStr *quic.ReceiveStream
+		for i := range numBatches {
+			str.SetWriteDeadline(time.Now().Add(rtt))
+			n, err := str.Write(make([]byte, 10000))
+			require.ErrorIs(t, err, os.ErrDeadlineExceeded)
+			require.Equal(t, int(windowSizes[i]), n)
+
+			if i == 0 {
+				serverStr, err = serverConn.AcceptUniStream(ctx)
+				require.NoError(t, err)
+			}
+			serverStr.SetReadDeadline(time.Now().Add(rtt))
+			n2, err := io.ReadFull(serverStr, make([]byte, 10000))
+			require.ErrorIs(t, err, os.ErrDeadlineExceeded)
+			require.Equal(t, n, n2)
+		}
+
+		conn.CloseWithError(0, "")
+		serverConn.CloseWithError(0, "")
+
+		var streamDataBlockedFrames []qlog.StreamDataBlockedFrame
+		var dataBlockedFrames []qlog.DataBlockedFrame
+		var bundledCounter int
+		for _, p := range counter.getSentShortHeaderPackets() {
+			blockedOffset := protocol.InvalidByteCount
+			for _, f := range p.frames {
+				switch frame := f.Frame.(type) {
+				case *qlog.StreamDataBlockedFrame:
+					streamDataBlockedFrames = append(streamDataBlockedFrames, *frame)
+					blockedOffset = frame.MaximumStreamData
+				case *qlog.DataBlockedFrame:
+					dataBlockedFrames = append(dataBlockedFrames, *frame)
+					blockedOffset = frame.MaximumData
+				case *qlog.StreamFrame:
+					// the STREAM frame is always packed last
+					if frame.Offset+frame.Length == int64(blockedOffset) {
+						bundledCounter++
+					}
 				}
 			}
 		}
-	}
 
-	var expectedBlockOffsets []protocol.ByteCount
-	for i := range numBatches {
-		var offset protocol.ByteCount
-		for _, s := range windowSizes[:i+1] {
-			offset += s
+		var expectedBlockOffsets []protocol.ByteCount
+		for i := range numBatches {
+			var offset protocol.ByteCount
+			for _, s := range windowSizes[:i+1] {
+				offset += s
+			}
+			expectedBlockOffsets = append(expectedBlockOffsets, offset)
 		}
-		expectedBlockOffsets = append(expectedBlockOffsets, offset)
-	}
 
-	assert.Equal(t, numBatches, bundledCounter)
-	if limitStream {
-		assert.Empty(t, dataBlockedFrames)
-		assert.Len(t, streamDataBlockedFrames, numBatches)
-		for i, f := range streamDataBlockedFrames {
-			assert.Equal(t, str.StreamID(), f.StreamID)
-			assert.Equal(t, expectedBlockOffsets[i], f.MaximumStreamData)
+		assert.Equal(t, numBatches, bundledCounter)
+		if limitStream {
+			assert.Empty(t, dataBlockedFrames)
+			assert.Len(t, streamDataBlockedFrames, numBatches)
+			for i, f := range streamDataBlockedFrames {
+				assert.Equal(t, str.StreamID(), f.StreamID)
+				assert.Equal(t, expectedBlockOffsets[i], f.MaximumStreamData)
+			}
 		}
-	}
-	if limitConn {
-		assert.Empty(t, streamDataBlockedFrames)
-		assert.Len(t, dataBlockedFrames, numBatches)
-		for i, f := range dataBlockedFrames {
-			assert.Equal(t, expectedBlockOffsets[i], f.MaximumData)
+		if limitConn {
+			assert.Empty(t, streamDataBlockedFrames)
+			assert.Len(t, dataBlockedFrames, numBatches)
+			for i, f := range dataBlockedFrames {
+				assert.Equal(t, expectedBlockOffsets[i], f.MaximumData)
+			}
 		}
-	}
+	})
 }

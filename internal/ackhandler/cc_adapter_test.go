@@ -230,7 +230,7 @@ func TestNilFactoryKeepsNativeCongestionController(t *testing.T) {
 		nil,
 	)
 	require.NoError(t, err)
-	require.Equal(t, "cubicSender", reflect.TypeOf(handler.congestion).Elem().Name())
+	require.Equal(t, "renoSender", reflect.TypeOf(handler.congestion).Elem().Name())
 }
 
 func TestBatchControllerReceivesACKAndLossesAsOneEvent(t *testing.T) {

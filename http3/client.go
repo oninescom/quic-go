@@ -297,11 +297,16 @@ func (c *ClientConn) roundTrip(req *http.Request) (*http.Response, error) {
 		case <-c.rawConn.ReceivedSettings():
 		case <-connCtx.Done():
 			return nil, context.Cause(connCtx)
+		case <-req.Context().Done():
+			return nil, req.Context().Err()
 		}
 		if !c.rawConn.Settings().EnableExtendedConnect {
 			return nil, errors.New("http3: server didn't enable Extended CONNECT")
 		}
 	}
+
+	c.rawConn.AddQlogProducer()
+	defer c.rawConn.RemoveQlogProducer()
 
 	reqDone := make(chan struct{})
 	str, err := c.openRequestStream(

@@ -71,7 +71,6 @@ func newSimnetLink(t *testing.T, rtt time.Duration) (client, server net.PacketCo
 
 	client = n.NewEndpoint(&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9001}, settings)
 	server = n.NewEndpoint(&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9002}, settings)
-	require.NoError(t, n.Start())
 	return client, server, func() {
 		require.NoError(t, n.Close())
 	}
@@ -101,6 +100,8 @@ func TestTransportPacketHandling(t *testing.T) {
 	select {
 	case p := <-connChan1:
 		require.Equal(t, conn.LocalAddr(), p.remoteAddr)
+		require.NotNil(t, p.buffer)
+		require.Same(t, &p.buffer.Data[0], &p.data[0])
 		connID, err := wire.ParseConnectionID(p.data, 0)
 		require.NoError(t, err)
 		require.Equal(t, connID1, connID)
@@ -152,6 +153,37 @@ func TestTransportAndDialConcurrentClose(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timeout")
 	}
+}
+
+func TestTransportSingleUseStopsAfterLastConnRemoved(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		_, conn, closeFn := newSimnetLink(t, 10*time.Millisecond)
+		defer closeFn()
+
+		tr := &Transport{Conn: conn, isSingleUse: true}
+		defer tr.Close()
+		ln, err := tr.Listen(&tls.Config{}, nil)
+		require.NoError(t, err)
+
+		connID := protocol.ParseConnectionID([]byte{1, 2, 3, 4})
+		m := (*packetHandlerMap)(tr)
+		require.True(t, m.Add(connID, &mockPacketHandler{}))
+		require.NoError(t, ln.Close())
+		synctest.Wait()
+		select {
+		case <-tr.listening:
+			t.Fatal("stopped listening while a connection is still alive")
+		default:
+		}
+
+		m.Remove(connID)
+		synctest.Wait()
+		select {
+		case <-tr.listening:
+		default:
+			t.Fatal("still listening")
+		}
+	})
 }
 
 func TestTransportErrFromConn(t *testing.T) {
@@ -258,8 +290,8 @@ func TestTransportStatelessResetSending(t *testing.T) {
 		require.Equal(t,
 			[]qlogwriter.Event{
 				qlog.PacketDropped{
-					Header:  qlog.PacketHeader{PacketType: qlog.PacketType1RTT},
-					Raw:     qlog.RawInfo{Length: len(smallPacket)},
+					Header:  qlog.PacketHeader{PacketNumber: protocol.InvalidPacketNumber, PacketType: qlog.PacketType1RTT},
+					Raw:     qlog.RawInfo{Length: len(smallPacket), PayloadLength: qlog.OmitLength},
 					Trigger: qlog.PacketDropUnknownConnectionID,
 				},
 			},
@@ -302,7 +334,7 @@ func TestTransportUnparseableQUICPackets(t *testing.T) {
 		require.Equal(t,
 			[]qlogwriter.Event{
 				qlog.PacketDropped{
-					Raw:     qlog.RawInfo{Length: 4},
+					Raw:     qlog.RawInfo{Length: 4, PayloadLength: qlog.OmitLength},
 					Trigger: qlog.PacketDropHeaderParseError,
 				},
 			},
@@ -336,7 +368,7 @@ func TestTransportListening(t *testing.T) {
 		require.Equal(t,
 			[]qlogwriter.Event{
 				qlog.PacketDropped{
-					Raw:     qlog.RawInfo{Length: len(data)},
+					Raw:     qlog.RawInfo{Length: len(data), PayloadLength: qlog.OmitLength},
 					Trigger: qlog.PacketDropUnknownConnectionID,
 				},
 			},
@@ -354,8 +386,8 @@ func TestTransportListening(t *testing.T) {
 		require.Equal(t,
 			[]qlogwriter.Event{
 				qlog.PacketDropped{
-					Header:  qlog.PacketHeader{PacketType: qlog.PacketTypeVersionNegotiation},
-					Raw:     qlog.RawInfo{Length: len(data)},
+					Header:  qlog.PacketHeader{PacketNumber: protocol.InvalidPacketNumber, PacketType: qlog.PacketTypeVersionNegotiation},
+					Raw:     qlog.RawInfo{Length: len(data), PayloadLength: qlog.OmitLength},
 					Trigger: qlog.PacketDropUnexpectedPacket,
 				},
 			},
@@ -572,7 +604,7 @@ func TestTransportDialingVersionNegotiation(t *testing.T) {
 
 	conn := &connTestHooks{
 		handshakeComplete: func() <-chan struct{} { return make(chan struct{}) },
-		run:               func() error { return &errCloseForRecreating{nextPacketNumber: 109, nextVersion: 789} },
+		run:               func() error { return &errSwitchVersion{nextPacketNumber: 109, nextVersion: 789} },
 	}
 	conn2 := &connTestHooks{
 		handshakeComplete: func() <-chan struct{} { return make(chan struct{}) },

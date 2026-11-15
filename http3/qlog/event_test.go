@@ -10,6 +10,7 @@ import (
 
 	"github.com/oninescom/quic-go"
 	"github.com/oninescom/quic-go/qlogwriter"
+	"github.com/oninescom/quic-go/qlogwriter/jsontext"
 
 	"github.com/stretchr/testify/require"
 )
@@ -66,6 +67,27 @@ func decode(t *testing.T, data string) (string, string) {
 	return result.Name, string(result.Data)
 }
 
+func TestRawInfo(t *testing.T) {
+	tests := []struct {
+		name     string
+		raw      RawInfo
+		expected string
+	}{
+		{"zero lengths", RawInfo{Length: 0, PayloadLength: 0}, `{"length":0,"payload_length":0}`},
+		{"only zero length", RawInfo{Length: 0, PayloadLength: OmitLength}, `{"length":0}`},
+		{"only zero payload length", RawInfo{Length: OmitLength, PayloadLength: 0}, `{"payload_length":0}`},
+		{"omitted lengths", RawInfo{Length: OmitLength, PayloadLength: OmitLength}, `{}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			require.NoError(t, tt.raw.encode(jsontext.NewEncoder(&buf)))
+			require.JSONEq(t, tt.expected, buf.String())
+			require.Equal(t, tt.expected != `{}`, tt.raw.HasValues())
+		})
+	}
+}
+
 func TestFrameParsedEvent(t *testing.T) {
 	name, ev := testEventEncoding(t, FrameParsed{
 		StreamID: quic.StreamID(4),
@@ -79,11 +101,8 @@ func TestFrameParsedEvent(t *testing.T) {
 	require.Equal(t, "http3:frame_parsed", name)
 	require.JSONEq(t, `{
 		"stream_id": 4,
-		"raw": {
-			"length": 1500,
-			"payload_length": 100
-		},
 		"frame": {
+			"raw": {"length": 1500, "payload_length": 100},
 			"frame_type": "data"
 		}
 	}`, ev)
@@ -93,6 +112,7 @@ func TestFrameCreatedEvent(t *testing.T) {
 	name, ev := testEventEncoding(t, FrameCreated{
 		StreamID: quic.StreamID(8),
 		Raw: RawInfo{
+			Length:        OmitLength,
 			PayloadLength: 200,
 		},
 		Frame: Frame{Frame: HeadersFrame{
@@ -106,15 +126,41 @@ func TestFrameCreatedEvent(t *testing.T) {
 	require.Equal(t, "http3:frame_created", name)
 	require.JSONEq(t, `{
 		"stream_id": 8,
-		"raw": {
-			"payload_length": 200
-		},
 		"frame": {
+			"raw": {"payload_length": 200},
 			"frame_type": "headers",
-			"header_fields": [
+			"headers": [
 				{"name": ":status", "value": "200"},
 				{"name": "content-type", "value": "text/html"}
 			]
 		}
+	}`, ev)
+}
+
+func TestStreamTypeSetEvent(t *testing.T) {
+	name, ev := testEventEncoding(t, StreamTypeSet{
+		Initiator:  InitiatorLocal,
+		StreamID:   3,
+		StreamType: StreamTypeQPACKEncode,
+	})
+
+	require.Equal(t, "http3:stream_type_set", name)
+	require.JSONEq(t, `{
+		"initiator": "local",
+		"stream_id": 3,
+		"stream_type": "qpack_encode"
+	}`, ev)
+
+	_, ev = testEventEncoding(t, StreamTypeSet{
+		Initiator:       InitiatorRemote,
+		StreamID:        7,
+		StreamType:      StreamTypeUnknown,
+		StreamTypeBytes: 0x21,
+	})
+	require.JSONEq(t, `{
+		"initiator": "remote",
+		"stream_id": 7,
+		"stream_type": "reserved",
+		"stream_type_bytes": 33
 	}`, ev)
 }
